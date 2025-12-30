@@ -6,9 +6,10 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include "crc.h"
 
 #define PACKET_MAX 1024
-#define DATA_HDR   8                 // "DATA"(4) + offset(4)
+#define DATA_HDR   12
 #define PAYLOAD_MAX (PACKET_MAX-DATA_HDR)
 
 //return the size of the file in bytes
@@ -31,11 +32,13 @@ int main(int argc, char** argv){
     //print usage if incorrect number of arguments is passed
     if(argc!=4){ fprintf(stderr,"Usage: %s <ip> <port> <file>\n", argv[0]); return 1; }
 
+    //init the crc table
+    crc32_init();
+
     //assign the program arguments to variables
     const char* ip = argv[1];
     int port = atoi(argv[2]);
     const char* path = argv[3];
-
 
     //open file in read binary mode
     FILE* f = fopen(path,"rb");
@@ -46,6 +49,10 @@ int main(int argc, char** argv){
     WSADATA wsa; 
     WSAStartup(MAKEWORD(2,2), &wsa);
     SOCKET s = socket(AF_INET, SOCK_DGRAM, 0);
+
+    //set socket timeout
+    int timeout_ms = 1000;  
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout_ms, sizeof(timeout_ms));
 
     //init and assign the ip address structure
     struct sockaddr_in dst = {0};
@@ -83,19 +90,56 @@ int main(int argc, char** argv){
         memcpy(pkt+4,&netoff,4);
 
         //add data to packet
-        fread(pkt+8,1,want,f);
+        fread(pkt+DATA_HDR,1,want,f);
 
-        //send packet
-        sendto(s,(char*)pkt,(int)(8+want),0,(struct sockaddr*)&dst,sizeof(dst));
+        uint32_t crc = crc32(pkt+DATA_HDR,want);
+        uint32_t netcrc = htonl(crc);
+        memcpy(pkt+8,&netcrc,4);
 
-        //move the offset
-        off += (uint32_t)want;
+        //retransmission loop
+        for(;;){
+            //send packet
+            sendto(s,(char*)pkt,want+DATA_HDR,0,(struct sockaddr*)&dst,sizeof(dst));
+            printf("Sent packet offset %u\n", off);
+
+            char reply[128];
+            struct sockaddr_in peer;
+            int peerlen = sizeof(peer);
+
+            int n = recvfrom(s,reply,sizeof(reply) - 1,0,(struct sockaddr *)&peer,&peerlen);
+            if (n < 0) {
+                int err = WSAGetLastError();
+                if (err == WSAETIMEDOUT) {
+                        //resend the same packet
+                        continue;
+                    } 
+                else {
+                    printf("recvfrom failed, WSA error = %d\n", err);
+                    goto out;
+                 }
+            }
+            reply[n] = 0;
+
+            uint32_t ack_off;
+            //break the resend loop if ACK received
+            if (sscanf(reply, "ACK %u", &ack_off) == 1 && ack_off == off) {
+                off += (uint32_t)want;
+                break;
+            }
+
+            //repeat the sending if NACK received
+            if (sscanf(reply, "NACK %u", &ack_off) == 1 && ack_off == off) {
+                continue;
+            }
+        }
     }
 
     //send the stop metadata
     sendto(s,"STOP",4,0,(struct sockaddr*)&dst,sizeof(dst));
 
+    
     //cleanups
+    out:
     closesocket(s);
     WSACleanup();
     fclose(f);
