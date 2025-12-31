@@ -63,7 +63,7 @@
                 } else if (!strncmp(txt, "SIZE=", 5)) {
                     expected_size = (uint32_t) strtoul(txt + 5, NULL, 10);
                 } else if (!strcmp(txt, "START")) {
-                    out = fopen("received.pdf", "wb+");
+                    out = fopen(filename, "wb+");
                     if (!out) {
                         perror("fopen");
                         break;
@@ -99,7 +99,7 @@
                 printf("NACK %u\n", off);
                 continue;
             }
-            
+
             if (out) {
                 fseek(out, (long) off, SEEK_SET);
                 fwrite(data, 1, payload, out);
